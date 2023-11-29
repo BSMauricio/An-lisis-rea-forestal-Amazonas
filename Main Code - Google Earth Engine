@@ -1,0 +1,263 @@
+// Year list to map
+var yearList = [1990, 1995, 2000, 2005, 2010, 2015, 2020];
+
+// Function to filter
+function filterCol(col, roi, date){
+  return col.filterDate(date[0], date[1]).filterBounds(roi);
+}
+
+// Composite function
+function landsat457(roi, date){
+  var col = filterCol(l4, roi, date).merge(filterCol(l5, roi, date));
+  var image = col.map(cloudMaskTm).median().clip(roi);
+  return image;
+}
+
+function landsat89(roi, date){
+  var col = filterCol(l8, roi, date).merge(filterCol(l9, roi, date));
+  var image = col.map(cloudMaskOli).median().clip(roi);
+  return image;
+}
+
+// Cloud mask
+function cloudMaskTm(image){
+  var qa = image.select('QA_PIXEL');
+  var dilated = 1 << 1;
+  var cloud = 1 << 3;
+  var shadow = 1 << 4;
+  var mask = qa.bitwiseAnd(dilated).eq(0)
+    .and(qa.bitwiseAnd(cloud).eq(0))
+    .and(qa.bitwiseAnd(shadow).eq(0));
+  
+  return image.select(['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7'], ['B2', 'B3', 'B4', 'B5', 'B6', 'B7'])
+    .updateMask(mask)
+    .multiply(0.0000275)
+    .add(-0.2);
+}
+
+function cloudMaskOli(image){
+  var qa = image.select('QA_PIXEL');
+  var dilated = 1 << 1;
+  var cirrus = 1 << 2;
+  var cloud = 1 << 3;
+  var shadow = 1 << 4;
+  var mask = qa.bitwiseAnd(dilated).eq(0)
+    .and(qa.bitwiseAnd(cirrus).eq(0))
+    .and(qa.bitwiseAnd(cloud).eq(0))
+    .and(qa.bitwiseAnd(shadow).eq(0));
+  
+  return image.select(['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7'], ['B2', 'B3', 'B4', 'B5', 'B6', 'B7'])
+    .updateMask(mask)
+    .multiply(0.0000275).add(-0.2);
+}
+
+// Función para calcular el Índice de Área Foliar (LAI)
+function calculateLAI(image){
+  var lai = image.expression(
+    '8.7* ((NIR - RED) / (NIR + RED + 0.2)) * (1.0 + 0.2)',
+    {
+      'NIR': image.select('B5'),
+      'RED': image.select('B4')
+    }
+  ).rename('LAI');
+
+  return lai;
+}
+
+// Generate image per year
+var forestCol = ee.ImageCollection(yearList.map(function(year){
+  var start = ee.Date.fromYMD(year, 1, 1); // Cambio aquí, inicio del año
+  var end = ee.Date.fromYMD(year + 1, 12, 31); // Cambio aquí, final del año
+  var date = [start, end];
+  
+  // Conditional on landsat collection to use
+  var landsat;
+  if (year < 2014) {
+    landsat = landsat457;
+  } else {
+    landsat = landsat89;
+  }
+  
+  // Create an image composite
+  var image = landsat(roi, date);
+
+  // Show the image
+  Map.addLayer(image, { min: [0.1, 0.05, 0], max: [0.4, 0.3, 0.15], bands: ['B5', 'B6', 'B2'] }, 'SR_' + year, false);
+  
+  // Bandmap
+  var bandMap = { NIR: image.select('B5'), RED: image.select('B4') };
+  
+  // Calculate LAI
+  var lai = calculateLAI(image);
+  Map.addLayer(lai, { min: 0, max: 5, palette: ['blue', 'white', 'green'] }, 'LAI_' + year, false);
+
+  // VI
+  var vi = image.expression('(NIR - RED) / (NIR + RED)', bandMap).rename('VI');
+  Map.addLayer(vi, { min: -1, max: 1, palette: ['blue', 'white', 'green']}, 'VI_' + year, false);
+  
+  // Forest
+  var forest = vi.gt(0.7).selfMask().rename('forest').toUint16();
+  Map.addLayer(forest, { palette: 'green' }, 'Forest_' + year, false);
+  
+  // Forest area
+  var forestArea = forest.multiply(ee.Image.pixelArea().divide(10000)).rename('area');
+  
+  return forest.multiply(year).toUint16().addBands(forestArea).set('year', year, 'system:time_start', date);
+}));
+
+// Forest visual
+var vis = {
+  'forest_class_values': yearList,
+  'forest_class_palette': ['4B0082', 'B22222', 'FF4500', 'FFD700', 'FFFF00', 'ADFF2F', '228B22']
+};
+
+// Forest year
+var forestYear = forestCol.select('forest').max().set(vis).clip(roi);
+Map.addLayer(forestYear, {}, 'Forest Year');
+
+// Generate NDVI image per year
+var ndviCol = ee.ImageCollection(yearList.map(function(year){
+  var start = ee.Date.fromYMD(year, 1, 1);
+  var end = ee.Date.fromYMD(year, 12, 31);
+  var date = [start, end];
+
+
+  // Conditional on landsat collection to use
+  var landsat;
+  if (year < 2014) {
+    landsat = landsat457;
+  } else {
+    landsat = landsat89;
+  }
+  
+  // Create an image composite
+  var image = landsat(roi, date);
+  
+  // Calculate NDVI
+  var ndvi = image.normalizedDifference(['B5', 'B4']).rename('NDVI');
+  
+  return ndvi.set('year', year, 'system:time_start', start);
+}));
+
+// Generate LAI chart per year
+var laiCol = ee.ImageCollection(yearList.map(function(year){
+  var start = ee.Date.fromYMD(year, 1, 1);
+  var end = ee.Date.fromYMD(year, 12, 31);
+  var date = [start, end];
+  
+  // Conditional on Landsat collection to use
+  var landsat;
+  if (year < 2014) {
+    landsat = landsat457;
+  } else {
+    landsat = landsat89;
+  }
+  
+  // Create an image composite
+  var image = landsat(roi, date);
+  
+  // Calculate LAI
+  var lai = calculateLAI(image);
+  
+  return lai.set('year', year, 'system:time_start', start);
+}));
+
+// Generate NDVI chart per year
+var ndviChart = ui.Chart.image.seriesByRegion({
+  imageCollection: ndviCol,
+  regions: roi,
+  reducer: ee.Reducer.mean(),
+  band: 'NDVI',
+  scale: 30,
+  seriesProperty: 'year'
+}).setChartType('LineChart')
+  .setOptions({
+    title: 'NDVI por año (1990 - 2020)',
+    vAxis: {
+      title: 'NDVI',
+      minValue: -1,
+      maxValue: 1
+    },
+    hAxis: {
+      title: 'Year'
+    },
+    pointWidth: 4,
+    colors: ['green']
+  });
+  
+// Generate LAI chart per year
+var laiChart = ui.Chart.image.seriesByRegion({
+  imageCollection: laiCol,
+  regions: roi,
+  reducer: ee.Reducer.mean(),
+  band: 'LAI',
+  scale: 30,
+  seriesProperty: 'year'
+}).setChartType('LineChart')
+  .setOptions({
+    title: 'Índice de Área Foliar (LAI) por año (1990 - 2020)',
+    vAxis: {
+      title: 'LAI',
+      minValue: 0,
+      maxValue: 5 // Ajusta el rango según tus necesidades
+    },
+    hAxis: {
+      title: 'Año'
+    },
+    pointWidth: 4,
+    colors: ['blue']
+  });
+
+// Calcular la correlación entre el LAI y el NDVI por año
+var correlationData = yearList.map(function(year){
+  var laiImage = laiCol.filterMetadata('year', 'equals', year).select('LAI').first();
+  var ndviImage = ndviCol.filterMetadata('year', 'equals', year).select('NDVI').first();
+  
+  var correlationValue = laiImage.addBands(ndviImage).reduceRegion({
+    reducer: ee.Reducer.pearsonsCorrelation(),
+    geometry: roi,
+    scale: 30
+  }).values().get(0);
+  
+  return ['año=',year,'Pearson=',correlationValue];
+});
+
+// Crear una lista de correlación
+var correlationList = ee.List(correlationData);
+
+
+// Forest area chart
+var forestAreaChart = ui.Chart.image.series(forestCol.select('area'), roi, ee.Reducer.sum(), 30, 'year')
+  .setChartType('AreaChart')
+  .setOptions({
+    title: 'Forest area 1990 - 2020',
+    vAxis: {
+      title: 'Area (Ha)'
+    },
+    hAxis: {
+      title: 'Year'
+    }
+  });
+
+// Print charts
+print(forestAreaChart);
+print(ndviChart);
+print(laiChart);
+print(correlationList);
+// Deforestation legend
+var labelList = ['1990 - 1995', '1995 - 2000', '2000 - 2005', '2005 - 2010', '2010 - 2015', '2015 - 2020', 'Current forest'];
+
+// Make a legend
+var legendPanel = ui.Panel([ ui.Label('Deforestation', { fontWeight: 'bold' }) ], ui.Panel.Layout.flow('vertical'), { position: 'bottom-left' });
+Map.add(legendPanel);
+
+// Add legend list
+labelList.map(function(label, index){
+  legendPanel.add(ui.Panel(
+    [
+      ui.Label('', { backgroundColor: vis.forest_class_palette[index], width: '30px', height: '20px' }),
+      ui.Label(label, { height: '20px' })
+    ],
+  ui.Panel.Layout.flow('horizontal')
+  ));
+});
